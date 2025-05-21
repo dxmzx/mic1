@@ -2,246 +2,277 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Tipos
-typedef unsigned char byte;       // 8 bits
-typedef unsigned int word;        // 32 bits
-typedef unsigned long int microinstr; // 64 bits (usado 36 bits)
+// Types
+typedef unsigned char byte;      // 8 bits
+typedef unsigned int word;       // 32 bits
+typedef unsigned long microinstr; // 64 bits (using only 36 bits)
 
-// Registradores
+// Constants
+#define MEMORY_SIZE 100000000
+#define PROGRAM_START_ADDRESS 0x0401
+#define MICROPROGRAM_SIZE 512
+
+// Memory
+byte *memory;
+
+// Control Storage
+microinstr control_store[MICROPROGRAM_SIZE];
+
+// Registers
 word MAR = 0, MDR = 0, PC = 0;
 byte MBR = 0;
 word SP = 0, LV = 0, TOS = 0, OPC = 0, CPP = 0, H = 0;
 microinstr MIR;
 word MPC = 0;
 
-// Barramentos
-word bus_B, bus_C;
+// Buses
+word BusB, BusC;
 
 // Flags
-byte N, Z;
+byte N = 0, Z = 0;
 
-// Decodificação da Microinstrução
-byte MIR_B, MIR_operation, MIR_shifter, MIR_mem, MIR_jump;
-word MIR_C, next_MPC;
+// Microinstruction fields
+byte MIR_B, MIR_OP, MIR_Shift, MIR_Mem, MIR_Jump;
+word MIR_C;
 
-// Armazenamento de Controle
-#define CONTROL_STORE_SIZE 512
-microinstr control_store[CONTROL_STORE_SIZE];
+// Function Prototypes
+void init_memory();
+void free_memory();
+void load_microprogram();
+void load_program(const char *program);
+void fetch_decode_execute_cycle();
 
-// Memória principal
-#define MEMORY_SIZE 100000000
-byte memory[MEMORY_SIZE];
-
-// Prototipagem
-void load_control_store();
-void load_program(const char *program_file);
-void show_status();
-void decode_microinstruction();
+void decode_microinstr();
 void assign_bus_B();
-void alu_operation();
+void alu();
 void assign_bus_C();
 void memory_operation();
-void jump_control();
-void print_binary(void* value, int type);
+void jump();
 
-// Laço Principal
+word read_word(word address);
+void write_word(word address, word value);
+byte read_byte(word address);
+void write_byte(word address, byte value);
+
+// Debug
+void print_binary(void *value, int type);
+void show_state();
+
+
+// ===================== Main =====================
 int main(int argc, const char *argv[]) {
     if (argc < 2) {
-        printf("Uso: %s <arquivo_programa>\n", argv[0]);
+        printf("Usage: %s program_file\n", argv[0]);
         return 1;
     }
 
-    load_control_store();
+    init_memory();
+    load_microprogram();
     load_program(argv[1]);
 
     while (1) {
-        show_status();
-        MIR = control_store[MPC];
-
-        decode_microinstruction();
-        assign_bus_B();
-        alu_operation();
-        assign_bus_C();
-        memory_operation();
-        jump_control();
+        show_state();
+        fetch_decode_execute_cycle();
     }
 
+    free_memory();
     return 0;
 }
 
-void load_control_store() {
-    FILE *file = fopen("microprog.rom", "rb");
-    if (!file) {
-        perror("Erro ao abrir microprog.rom");
+
+// ================= Memory Management =================
+
+void init_memory() {
+    memory = (byte *)malloc(MEMORY_SIZE);
+    if (memory == NULL) {
+        printf("Memory allocation failed!\n");
         exit(1);
     }
+    memset(memory, 0, MEMORY_SIZE);
+}
 
-    fread(control_store, sizeof(microinstr), CONTROL_STORE_SIZE, file);
+void free_memory() {
+    free(memory);
+}
+
+word read_word(word address) {
+    if (address * 4 + 3 >= MEMORY_SIZE) {
+        printf("Memory read error at address %X\n", address);
+        exit(1);
+    }
+    word value;
+    memcpy(&value, &memory[address * 4], 4);
+    return value;
+}
+
+void write_word(word address, word value) {
+    if (address * 4 + 3 >= MEMORY_SIZE) {
+        printf("Memory write error at address %X\n", address);
+        exit(1);
+    }
+    memcpy(&memory[address * 4], &value, 4);
+}
+
+byte read_byte(word address) {
+    if (address >= MEMORY_SIZE) {
+        printf("Memory read error at address %X\n", address);
+        exit(1);
+    }
+    return memory[address];
+}
+
+void write_byte(word address, byte value) {
+    if (address >= MEMORY_SIZE) {
+        printf("Memory write error at address %X\n", address);
+        exit(1);
+    }
+    memory[address] = value;
+}
+
+
+// ================= Load Programs =================
+
+void load_microprogram() {
+    FILE *file = fopen("microprog.rom", "rb");
+    if (!file) {
+        printf("Error opening microprogram file.\n");
+        exit(1);
+    }
+    fread(control_store, sizeof(microinstr), MICROPROGRAM_SIZE, file);
     fclose(file);
 }
 
-void load_program(const char* program_file) {
-    FILE *file = fopen(program_file, "rb");
+void load_program(const char *program) {
+    FILE *file = fopen(program, "rb");
     if (!file) {
-        perror("Erro ao abrir programa");
+        printf("Error opening program file.\n");
         exit(1);
     }
 
     word size;
-    fread(&size, sizeof(word), 1, file);
+    byte size_bytes[4];
+
+    fread(size_bytes, sizeof(byte), 4, file);
+    memcpy(&size, size_bytes, 4);
+
     fread(memory, sizeof(byte), 20, file);
-    fread(&memory[0x0401], sizeof(byte), size - 20, file);
+    fread(&memory[PROGRAM_START_ADDRESS], sizeof(byte), size - 20, file);
 
     fclose(file);
 }
 
-void decode_microinstruction() {
-    MIR_B = MIR & 0b1111;
-    MIR_mem = (MIR >> 4) & 0b111;
-    MIR_C = (MIR >> 7) & 0b111111111;
-    MIR_operation = (MIR >> 16) & 0b111111;
-    MIR_shifter = (MIR >> 22) & 0b11;
-    MIR_jump = (MIR >> 24) & 0b111;
-    next_MPC = (MIR >> 27) & 0b111111111;
+
+// ================= Fetch-Decode-Execute =================
+
+void fetch_decode_execute_cycle() {
+    MIR = control_store[MPC];
+
+    decode_microinstr();
+    assign_bus_B();
+    alu();
+    assign_bus_C();
+    memory_operation();
+    jump();
 }
+
+
+// ================= Microinstruction Decode =================
+
+void decode_microinstr() {
+    MIR_B        = (MIR) & 0b1111;
+    MIR_Mem      = (MIR >> 4) & 0b111;
+    MIR_C        = (MIR >> 7) & 0b111111111;
+    MIR_OP       = (MIR >> 16) & 0b111111;
+    MIR_Shift    = (MIR >> 22) & 0b11;
+    MIR_Jump     = (MIR >> 24) & 0b111;
+    MPC          = (MIR >> 27) & 0b111111111;
+}
+
+
+// ================= Bus Operations =================
 
 void assign_bus_B() {
     switch (MIR_B) {
-        case 0: bus_B = MDR; break;
-        case 1: bus_B = PC; break;
-        case 2: bus_B = (MBR & 0x80) ? (MBR | 0xFFFFFF00) : MBR; break;
-        case 3: bus_B = MBR; break;
-        case 4: bus_B = SP; break;
-        case 5: bus_B = LV; break;
-        case 6: bus_B = CPP; break;
-        case 7: bus_B = TOS; break;
-        case 8: bus_B = OPC; break;
-        default: bus_B = 0xFFFFFFFF; break;
+        case 0: BusB = MDR; break;
+        case 1: BusB = PC; break;
+        case 2: // MBR with sign extension
+            BusB = (MBR & 0x80) ? (MBR | 0xFFFFFF00) : MBR;
+            break;
+        case 3: BusB = MBR; break;
+        case 4: BusB = SP; break;
+        case 5: BusB = LV; break;
+        case 6: BusB = CPP; break;
+        case 7: BusB = TOS; break;
+        case 8: BusB = OPC; break;
+        default: BusB = 0xFFFFFFFF; break;
     }
 }
 
-void alu_operation() {
-    switch (MIR_operation) {
-        case 12: bus_C = H & bus_B; break;
-        case 17: bus_C = 1; break;
-        case 18: bus_C = -1; break;
-        case 20: bus_C = bus_B; break;
-        case 24: bus_C = H; break;
-        case 26: bus_C = ~H; break;
-        case 28: bus_C = H | bus_B; break;
-        case 44: bus_C = ~bus_B; break;
-        case 53: bus_C = bus_B + 1; break;
-        case 54: bus_C = bus_B - 1; break;
-        case 57: bus_C = H + 1; break;
-        case 59: bus_C = -H; break;
-        case 60: bus_C = H + bus_B; break;
-        case 61: bus_C = H + bus_B + 1; break;
-        case 63: bus_C = bus_B - H; break;
-        default: bus_C = 0; break;
+
+// ================= ALU =================
+
+void alu() {
+    switch (MIR_OP) {
+        case 12: BusC = H & BusB; break;
+        case 17: BusC = 1; break;
+        case 18: BusC = -1; break;
+        case 20: BusC = BusB; break;
+        case 24: BusC = H; break;
+        case 26: BusC = ~H; break;
+        case 28: BusC = H | BusB; break;
+        case 44: BusC = ~BusB; break;
+        case 53: BusC = BusB + 1; break;
+        case 54: BusC = BusB - 1; break;
+        case 57: BusC = H + 1; break;
+        case 59: BusC = -H; break;
+        case 60: BusC = H + BusB; break;
+        case 61: BusC = H + BusB + 1; break;
+        case 63: BusC = BusB - H; break;
+        default: BusC = 0; break;
     }
 
-    Z = (bus_C == 0);
-    N = (bus_C >> 31) & 1;
+    // Flags
+    Z = (BusC == 0);
+    N = (BusC != 0);
 
-    switch (MIR_shifter) {
-        case 1: bus_C <<= 8; break;
-        case 2: bus_C >>= 1; break;
+    // Shift
+    switch (MIR_Shift) {
+        case 1: BusC = BusC << 8; break;
+        case 2: BusC = BusC >> 1; break;
     }
 }
+
+
+// ================= Assign Bus C =================
 
 void assign_bus_C() {
-    if (MIR_C & 0b000000001) MAR = bus_C;
-    if (MIR_C & 0b000000010) MDR = bus_C;
-    if (MIR_C & 0b000000100) PC  = bus_C;
-    if (MIR_C & 0b000001000) SP  = bus_C;
-    if (MIR_C & 0b000010000) LV  = bus_C;
-    if (MIR_C & 0b000100000) CPP = bus_C;
-    if (MIR_C & 0b001000000) TOS = bus_C;
-    if (MIR_C & 0b010000000) OPC = bus_C;
-    if (MIR_C & 0b100000000) H   = bus_C;
+    if (MIR_C & 0b000000001) MAR = BusC;
+    if (MIR_C & 0b000000010) MDR = BusC;
+    if (MIR_C & 0b000000100) PC  = BusC;
+    if (MIR_C & 0b000001000) SP  = BusC;
+    if (MIR_C & 0b000010000) LV  = BusC;
+    if (MIR_C & 0b000100000) CPP = BusC;
+    if (MIR_C & 0b001000000) TOS = BusC;
+    if (MIR_C & 0b010000000) OPC = BusC;
+    if (MIR_C & 0b100000000) H   = BusC;
 }
+
+
+// ================= Memory Operation =================
 
 void memory_operation() {
-    if (MIR_mem & 0b001) MBR = memory[PC];
-    if (MIR_mem & 0b010) {
-        if ((MAR * 4 + 3) >= MEMORY_SIZE) {
-            printf("Erro: Leitura de memoria invalida em endereco %X\n", MAR * 4);
-            exit(1);
-        }
-        memcpy(&MDR, &memory[MAR * 4], 4);
-    }
-    if (MIR_mem & 0b100) {
-        if ((MAR * 4 + 3) >= MEMORY_SIZE) {
-            printf("Erro: Escrita de memoria invalida em endereco %X\n", MAR * 4);
-            exit(1);
-        }
-        memcpy(&memory[MAR * 4], &MDR, 4);
-    }
+    if (MIR_Mem & 0b001) MBR = read_byte(PC);
+    if (MIR_Mem & 0b010) MDR = read_word(MAR);
+    if (MIR_Mem & 0b100) write_word(MAR, MDR);
 }
 
-void jump_control() {
-    MPC = next_MPC;
-    if (MIR_jump & 0b001) MPC |= (N << 8);
-    if (MIR_jump & 0b010) MPC |= (Z << 8);
-    if (MIR_jump & 0b100) MPC |= MBR;
+
+// ================= Jump Logic =================
+
+void jump() {
+    if (MIR_Jump & 0b001) MPC |= (N << 8);
+    if (MIR_Jump & 0b010) MPC |= (Z << 8);
+    if (MIR_Jump & 0b100) MPC |= MBR;
 }
 
-void show_status() {
-    printf("\n==================== ESTADO DO SISTEMA ====================\n");
-
-    printf("\nREGISTRADORES:\n");
-    printf("MAR: "); print_binary(&MAR, 3); printf(" (%X)\n", MAR);
-    printf("MDR: "); print_binary(&MDR, 3); printf(" (%X)\n", MDR);
-    printf("PC : "); print_binary(&PC , 3); printf(" (%X)\n", PC);
-    printf("MBR: "); print_binary(&MBR, 2); printf(" (%X)\n", MBR);
-    printf("SP : "); print_binary(&SP , 3); printf(" (%X)\n", SP);
-    printf("LV : "); print_binary(&LV , 3); printf(" (%X)\n", LV);
-    printf("CPP: "); print_binary(&CPP, 3); printf(" (%X)\n", CPP);
-    printf("TOS: "); print_binary(&TOS, 3); printf(" (%X)\n", TOS);
-    printf("OPC: "); print_binary(&OPC, 3); printf(" (%X)\n", OPC);
-    printf("H  : "); print_binary(&H  , 3); printf(" (%X)\n", H);
-    printf("MPC: "); print_binary(&MPC, 5); printf(" (%X)\n", MPC);
-    printf("MIR: "); print_binary(&MIR, 4); printf("\n");
-
-    getchar();
-}
-
-void print_binary(void* value, int type) {
-    switch (type) {
-        case 1: {
-            byte* v = (byte*)value;
-            for (int i = 3; i >= 0; i--) {
-                for (int j = 7; j >= 0; j--)
-                    printf("%d", (v[i] >> j) & 1);
-                printf(" ");
-            }
-            break;
-        }
-        case 2: {
-            byte v = *((byte*)value);
-            for (int j = 7; j >= 0; j--)
-                printf("%d", (v >> j) & 1);
-            break;
-        }
-        case 3: {
-            word v = *((word*)value);
-            for (int j = 31; j >= 0; j--)
-                printf("%d", (v >> j) & 1);
-            break;
-        }
-        case 4: {
-            microinstr v = *((microinstr*)value);
-            for (int j = 35; j >= 0; j--) {
-                printf("%ld", (v >> j) & 1);
-                if (j == 32 || j == 29 || j == 20 || j == 12 || j == 9) printf(" ");
-            }
-            break;
-        }
-        case 5: {
-            word v = *((word*)value) & 0x1FF;
-            for (int j = 8; j >= 0; j--)
-                printf("%d", (v >> j) & 1);
-            break;
-        }
-    }
 }
