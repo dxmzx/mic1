@@ -8,24 +8,21 @@ typedef unsigned int word;        // 32 bits
 typedef unsigned long int microinstr; // 64 bits (usado 36 bits)
 
 // Registradores
-word MAR = 0, MDR = 0, PC = 0;    // Memória
-byte MBR = 0;                     // Memória
-
-word SP = 0, LV = 0, TOS = 0,     // Operações da ULA
-     OPC = 0, CPP = 0, H = 0;     // Operações da ULA
-
-microinstr MIR;                   // Microinstrução atual
-word MPC = 0;                     // Próxima microinstrução
+word MAR = 0, MDR = 0, PC = 0;
+byte MBR = 0;
+word SP = 0, LV = 0, TOS = 0, OPC = 0, CPP = 0, H = 0;
+microinstr MIR;
+word MPC = 0;
 
 // Barramentos
 word bus_B, bus_C;
 
-// Flip-Flops
+// Flags
 byte N, Z;
 
-// Auxiladores para Decodificar Microinstrução
+// Decodificação da Microinstrução
 byte MIR_B, MIR_operation, MIR_shifter, MIR_mem, MIR_jump;
-word MIR_C;
+word MIR_C, next_MPC;
 
 // Armazenamento de Controle
 #define CONTROL_STORE_SIZE 512
@@ -35,7 +32,7 @@ microinstr control_store[CONTROL_STORE_SIZE];
 #define MEMORY_SIZE 100000000
 byte memory[MEMORY_SIZE];
 
-// Prototipo das Funções
+// Prototipagem
 void load_control_store();
 void load_program(const char *program_file);
 void show_status();
@@ -72,8 +69,6 @@ int main(int argc, const char *argv[]) {
     return 0;
 }
 
-// Implementação das Funções
-
 void load_control_store() {
     FILE *file = fopen("microprog.rom", "rb");
     if (!file) {
@@ -93,7 +88,7 @@ void load_program(const char* program_file) {
     }
 
     word size;
-    fread(&size, sizeof(byte), 4, file);
+    fread(&size, sizeof(word), 1, file);
     fread(memory, sizeof(byte), 20, file);
     fread(&memory[0x0401], sizeof(byte), size - 20, file);
 
@@ -107,16 +102,14 @@ void decode_microinstruction() {
     MIR_operation = (MIR >> 16) & 0b111111;
     MIR_shifter = (MIR >> 22) & 0b11;
     MIR_jump = (MIR >> 24) & 0b111;
-    MPC = (MIR >> 27) & 0b111111111;
+    next_MPC = (MIR >> 27) & 0b111111111;
 }
 
 void assign_bus_B() {
     switch (MIR_B) {
         case 0: bus_B = MDR; break;
         case 1: bus_B = PC; break;
-        case 2: 
-            bus_B = (MBR & 0x80) ? (MBR | 0xFFFFFF00) : MBR;
-            break;
+        case 2: bus_B = (MBR & 0x80) ? (MBR | 0xFFFFFF00) : MBR; break;
         case 3: bus_B = MBR; break;
         case 4: bus_B = SP; break;
         case 5: bus_B = LV; break;
@@ -147,8 +140,8 @@ void alu_operation() {
         default: bus_C = 0; break;
     }
 
-    N = (bus_C != 0) ? 0 : 1;
-    Z = (bus_C == 0) ? 1 : 0;
+    Z = (bus_C == 0);
+    N = (bus_C >> 31) & 1;
 
     switch (MIR_shifter) {
         case 1: bus_C <<= 8; break;
@@ -170,11 +163,24 @@ void assign_bus_C() {
 
 void memory_operation() {
     if (MIR_mem & 0b001) MBR = memory[PC];
-    if (MIR_mem & 0b010) memcpy(&MDR, &memory[MAR * 4], 4);
-    if (MIR_mem & 0b100) memcpy(&memory[MAR * 4], &MDR, 4);
+    if (MIR_mem & 0b010) {
+        if ((MAR * 4 + 3) >= MEMORY_SIZE) {
+            printf("Erro: Leitura de memoria invalida em endereco %X\n", MAR * 4);
+            exit(1);
+        }
+        memcpy(&MDR, &memory[MAR * 4], 4);
+    }
+    if (MIR_mem & 0b100) {
+        if ((MAR * 4 + 3) >= MEMORY_SIZE) {
+            printf("Erro: Escrita de memoria invalida em endereco %X\n", MAR * 4);
+            exit(1);
+        }
+        memcpy(&memory[MAR * 4], &MDR, 4);
+    }
 }
 
 void jump_control() {
+    MPC = next_MPC;
     if (MIR_jump & 0b001) MPC |= (N << 8);
     if (MIR_jump & 0b010) MPC |= (Z << 8);
     if (MIR_jump & 0b100) MPC |= MBR;
@@ -200,16 +206,9 @@ void show_status() {
     getchar();
 }
 
-//FUNÇÃO RESPONSAVEL POR PRINTAR OS VALORES EM BINARIO
-//TIPO 1: Imprime o binário de 4 bytes seguidos 
-//TIPO 2: Imprime o binário de 1 byte
-//TIPO 3: Imprime	o binario de uma palavra 
-//TIPO 4: Imprime o binário de uma microinstrução
-//TIPO 5: Imprime o binário dos 9 bits do MPC
-
 void print_binary(void* value, int type) {
     switch (type) {
-        case 1: { // 4 bytes
+        case 1: {
             byte* v = (byte*)value;
             for (int i = 3; i >= 0; i--) {
                 for (int j = 7; j >= 0; j--)
@@ -218,19 +217,19 @@ void print_binary(void* value, int type) {
             }
             break;
         }
-        case 2: { // 1 byte
+        case 2: {
             byte v = *((byte*)value);
             for (int j = 7; j >= 0; j--)
                 printf("%d", (v >> j) & 1);
             break;
         }
-        case 3: { // word
+        case 3: {
             word v = *((word*)value);
             for (int j = 31; j >= 0; j--)
                 printf("%d", (v >> j) & 1);
             break;
         }
-        case 4: { // microinstr (36 bits)
+        case 4: {
             microinstr v = *((microinstr*)value);
             for (int j = 35; j >= 0; j--) {
                 printf("%ld", (v >> j) & 1);
@@ -238,7 +237,7 @@ void print_binary(void* value, int type) {
             }
             break;
         }
-        case 5: { // 9 bits do MPC
+        case 5: {
             word v = *((word*)value) & 0x1FF;
             for (int j = 8; j >= 0; j--)
                 printf("%d", (v >> j) & 1);
